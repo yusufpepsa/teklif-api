@@ -6,6 +6,7 @@ orijinal formatta AX Excel dosyası üretir ve geri döner.
 """
 
 import io
+import os
 import re
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
@@ -192,191 +193,13 @@ def build_ax(info, kalemler):
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-
-    # GARANTİLİ logo: çıktıda logo yoksa logo.png'yi zip düzeyinde enjekte et
-    buf = _ensure_logo(buf)
     return buf
 
 
-def _ensure_logo(xlsx_buf):
-    """Çıktıda logo yoksa logo.png'yi B1 hücresine zip düzeyinde ekler."""
-    import zipfile as zf
-
-    xlsx_buf.seek(0)
-    raw = xlsx_buf.read()
-
-    # Zaten logo varsa dokunma
-    try:
-        with zf.ZipFile(io.BytesIO(raw)) as ztest:
-            if any('media' in n for n in ztest.namelist()):
-                xlsx_buf.seek(0)
-                return xlsx_buf
-    except Exception:
-        xlsx_buf.seek(0)
-        return xlsx_buf
-
-    if not os.path.exists(LOGO_PATH):
-        xlsx_buf.seek(0)
-        return xlsx_buf
-
-    with open(LOGO_PATH, "rb") as fh:
-        logo_bytes = fh.read()
-
-    # Drawing XML: logoyu B1'e (col 1, row 0) 239x70 px yerleştir
-    EMU_W = 239 * 9525
-    EMU_H = 70 * 9525
-    drawing_xml = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
-        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-        '<xdr:oneCellAnchor>'
-        '<xdr:from><xdr:col>1</xdr:col><xdr:colOff>76200</xdr:colOff>'
-        '<xdr:row>0</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
-        f'<xdr:ext cx="{EMU_W}" cy="{EMU_H}"/>'
-        '<xdr:pic><xdr:nvPicPr>'
-        '<xdr:cNvPr id="1" name="Logo"/><xdr:cNvPicPr/></xdr:nvPicPr>'
-        '<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rId1"/>'
-        '<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
-        '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
-        '</xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>'
-    )
-    drawing_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/logo.jpeg"/>'
-        '</Relationships>'
-    )
-
-    out = io.BytesIO()
-    with zf.ZipFile(io.BytesIO(raw)) as zin:
-        with zf.ZipFile(out, "w", zf.ZIP_DEFLATED) as zout:
-            for item in zin.namelist():
-                data = zin.read(item)
-                if item == "xl/worksheets/sheet1.xml":
-                    s = data.decode("utf-8")
-                    if "<drawing" not in s:
-                        s = s.replace("</worksheet>", '<drawing r:id="rIdLogo"/></worksheet>')
-                        # r namespace zaten sheet'te var mı? garantiye al
-                        if 'xmlns:r=' not in s.split('>',1)[0]:
-                            s = s.replace("<worksheet ",
-                                '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ', 1)
-                    data = s.encode("utf-8")
-                elif item == "[Content_Types].xml":
-                    s = data.decode("utf-8")
-                    add = ""
-                    if 'Extension="jpeg"' not in s:
-                        add += '<Default Extension="jpeg" ContentType="image/jpeg"/>'
-                    if "drawing1.xml" not in s:
-                        add += '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
-                    s = s.replace("</Types>", add + "</Types>")
-                    data = s.encode("utf-8")
-                zout.writestr(item, data)
-
-            # sheet1 rels: drawing ilişkisi ekle
-            rels_path = "xl/worksheets/_rels/sheet1.xml.rels"
-            existing_rels = None
-            try:
-                existing_rels = zin.read(rels_path).decode("utf-8")
-            except KeyError:
-                existing_rels = None
-            if existing_rels:
-                if "rIdLogo" not in existing_rels:
-                    existing_rels = existing_rels.replace("</Relationships>",
-                        '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
-                zout.writestr(rels_path, existing_rels)
-            else:
-                zout.writestr(rels_path,
-                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                    '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
-
-            zout.writestr("xl/drawings/drawing1.xml", drawing_xml)
-            zout.writestr("xl/drawings/_rels/drawing1.xml.rels", drawing_rels)
-            zout.writestr("xl/media/logo.jpeg", logo_bytes)
-
-    out.seek(0)
-    return out
-
-
-def safe_filename(s):
-    """Dosya adı için geçersiz karakterleri temizle"""
-    return re.sub(r'[/\\:*?"<>|]', "-", s).strip()
-
-
-# ─── API Endpoint'leri ───────────────────────────────────
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
-
-
-@app.route("/ax", methods=["POST"])
-def convert_ax():
-    """Teklif Excel'i al, AX Excel'i döndür"""
-    if "file" not in request.files:
-        return jsonify({"error": "Dosya bulunamadı. 'file' alanında Excel gönderin."}), 400
-
-    f = request.files["file"]
-    if not f.filename.lower().endswith((".xlsx", ".xlsm")):
-        return jsonify({"error": "Sadece .xlsx veya .xlsm dosyaları kabul edilir."}), 400
-
-    try:
-        file_bytes = f.read()
-        info, kalemler = parse_teklif(file_bytes)
-    except Exception as e:
-        return jsonify({"error": f"Dosya okunamadı: {str(e)}"}), 422
-
-    if not kalemler:
-        return jsonify({"error": "Dosyada tutarı 0'dan büyük kalem bulunamadı."}), 422
-
-    ax_buf = build_ax(info, kalemler)
-
-    parts = ["AX"]
-    if info["magaza_kodu"]:
-        parts.append(info["magaza_kodu"])
-    if info["magaza_adi"]:
-        parts.append(info["magaza_adi"])
-    if info["srv_no"]:
-        parts.append(info["srv_no"])
-    fname = safe_filename(" - ".join(parts)) + ".xlsx"
-
-    return send_file(
-        ax_buf,
-        as_attachment=True,
-        download_name=fname,
-        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-
-@app.route("/ax/preview", methods=["POST"])
-def preview_ax():
-    """İndirmeden önce önizleme verisi döndür (JSON)"""
-    if "file" not in request.files:
-        return jsonify({"error": "Dosya bulunamadı."}), 400
-
-    f = request.files["file"]
-    try:
-        file_bytes = f.read()
-        info, kalemler = parse_teklif(file_bytes)
-    except Exception as e:
-        return jsonify({"error": f"Dosya okunamadı: {str(e)}"}), 422
-
-    return jsonify({
-        "info": info,
-        "kalemler": kalemler,
-        "kalem_sayisi": len(kalemler),
-    })
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
-
-
 # ═════════════════════════════════════════════════════════
-# TEKLİF DOSYASI ÜRETME — Şablon tabanlı (birebir kopya)
+# TEKLİF DOSYASI ÜRETME — Şablon tabanlı (logo şablondan korunur)
 # ═════════════════════════════════════════════════════════
 from datetime import datetime
-import os, copy
 
 SABLON_PATH = os.path.join(os.path.dirname(__file__), "sablon.xlsx")
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo.png")
@@ -389,13 +212,10 @@ SEC_LAYOUT = {
     "D": {"baslik": 34, "veri": (35, 39), "toplam": 40},
     "E": {"baslik": 41, "veri": (42, 42), "toplam": 43},
 }
-# Not: Şablonda B ve C bölümlerinde HAZIR kalemler var (ET kodlu).
-# Kullanıcının gönderdiği kalemleri bu hazır satırlarla eşleştirip
-# miktar/fiyat yazacağız; eşleşmeyen yeni kalemleri boş satırlara ekleyeceğiz.
 
 
 def build_teklif(data):
-    """Orijinal şablonu açar, sadece verileri doldurur — %100 birebir görünüm."""
+    """Orijinal şablonu açar, sadece verileri doldurur. Logo şablonda gömülü kalır."""
     wb = load_workbook(SABLON_PATH)
     ws = wb.active
 
@@ -407,25 +227,18 @@ def build_teklif(data):
     ws["F5"] = "TRY"
     ws["F6"] = data.get("hazirlayan", "YUSUF FIRAT YAY")
 
-    # ── Şablondaki TÜM eski kalem verilerini temizle (ET kod ve açıklama DAHİL) ──
-    # Kullanıcı sadece kendi eklediği kalemleri görmek istiyor.
+    # ── Şablondaki eski kalem verilerini temizle (ET kod/açıklama dahil) ──
     for sec, lay in SEC_LAYOUT.items():
         for r in range(lay["veri"][0], lay["veri"][1] + 1):
-            ws[f"A{r}"] = None   # No
-            ws[f"B{r}"] = None   # ET Kod
-            ws[f"C{r}"] = None   # Açıklama
-            ws[f"D{r}"] = None   # Birim
-            ws[f"E{r}"] = None   # Miktar
-            ws[f"F{r}"] = None   # Birim Fiyat
-            ws[f"G{r}"] = None   # Tutar
-            ws[f"I{r}"] = None   # Not
+            for col in ("A", "B", "C", "D", "E", "F", "G", "I"):
+                ws[f"{col}{r}"] = None
 
     # ── Kalemleri bölümlere göre grupla ──
     by_sec = {}
     for k in data.get("kalemler", []):
         by_sec.setdefault(k.get("bolum", "E"), []).append(k)
 
-    # Kalemleri sırayla boş satırlara yaz (hazır kalem mantığı yok, sadece kullanıcının girdikleri)
+    # ── Kalemleri sırayla boş satırlara yaz ──
     for sec in ["A", "B", "C", "D", "E"]:
         items = by_sec.get(sec, [])
         lay = SEC_LAYOUT[sec]
@@ -434,7 +247,7 @@ def build_teklif(data):
         r = v_start
         for k in items:
             if r > v_end:
-                break  # bölümde yer kalmadı
+                break
             ws[f"A{r}"] = no
             ws[f"B{r}"] = str(k.get("et_kodu", "")).strip()
             ws[f"C{r}"] = k.get("aciklama", "")
@@ -447,6 +260,18 @@ def build_teklif(data):
             no += 1
             r += 1
 
+    # ── Bölüm ara toplamları ve genel toplamlar (formül) ──
+    for sec, lay in SEC_LAYOUT.items():
+        v_start, v_end = lay["veri"]
+        ws[f"H{lay['toplam']}"] = f"=SUM(G{v_start}:G{v_end})"
+
+    toplam_satirlari = [SEC_LAYOUT[s]["toplam"] for s in SEC_LAYOUT]
+    toplam_formula = "+".join([f"H{r}" for r in toplam_satirlari])
+    ws["H53"] = f"={toplam_formula}"
+    ws["H54"] = None
+    ws["H55"] = "=H53*0.2"
+    ws["H56"] = "=H53+H55"
+
     # ── Notlar ──
     notlar = data.get("notlar", {})
     if notlar.get("uretim_sevk_suresi") not in (None, ""):
@@ -458,134 +283,16 @@ def build_teklif(data):
     if notlar.get("not4"):
         ws["C48"] = notlar.get("not4")
 
-    # ── Ek not ── (kullanıcı göndermezse şablondaki eski yazıyı temizle)
+    # ── Ek not (yoksa şablondaki eskiyi temizle) ──
     ws["C52"] = data.get("ek_not", "") or None
 
-    # ── Formülleri yaz (Excel'de miktar/fiyat değişince otomatik güncellensin) ──
-    # G sütunu (tutar) zaten =E*F formülü olarak yazıldı yukarıda.
-    # Bölüm ara toplamları ve genel toplamlar da formül olsun:
-    for sec, lay in SEC_LAYOUT.items():
-        v_start, v_end = lay["veri"]
-        ws[f"H{lay['toplam']}"] = f"=SUM(G{v_start}:G{v_end})"
-
-    toplam_satirlari = [SEC_LAYOUT[s]["toplam"] for s in SEC_LAYOUT]
-    toplam_formula = "+".join([f"H{r}" for r in toplam_satirlari])
-    ws["H53"] = f"={toplam_formula}"   # TOPLAM
-    ws["H54"] = None                    # KDV %8 kullanılmıyor
-    ws["H55"] = "=H53*0.2"             # KDV %20
-    ws["H56"] = "=H53+H55"            # G.TOPLAM (bozuk şablon formülü düzeltildi)
-
-    # Excel dosyayı açar açmaz formülleri hesaplasın
+    # Excel açar açmaz formülleri hesaplasın
     wb.calculation.fullCalcOnLoad = True
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
-
-    # GARANTİLİ logo: çıktıda logo yoksa logo.png'yi zip düzeyinde enjekte et
-    buf = _ensure_logo(buf)
     return buf
-
-
-def _ensure_logo(xlsx_buf):
-    """Çıktıda logo yoksa logo.png'yi B1 hücresine zip düzeyinde ekler."""
-    import zipfile as zf
-
-    xlsx_buf.seek(0)
-    raw = xlsx_buf.read()
-
-    # Zaten logo varsa dokunma
-    try:
-        with zf.ZipFile(io.BytesIO(raw)) as ztest:
-            if any('media' in n for n in ztest.namelist()):
-                xlsx_buf.seek(0)
-                return xlsx_buf
-    except Exception:
-        xlsx_buf.seek(0)
-        return xlsx_buf
-
-    if not os.path.exists(LOGO_PATH):
-        xlsx_buf.seek(0)
-        return xlsx_buf
-
-    with open(LOGO_PATH, "rb") as fh:
-        logo_bytes = fh.read()
-
-    # Drawing XML: logoyu B1'e (col 1, row 0) 239x70 px yerleştir
-    EMU_W = 239 * 9525
-    EMU_H = 70 * 9525
-    drawing_xml = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
-        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
-        '<xdr:oneCellAnchor>'
-        '<xdr:from><xdr:col>1</xdr:col><xdr:colOff>76200</xdr:colOff>'
-        '<xdr:row>0</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
-        f'<xdr:ext cx="{EMU_W}" cy="{EMU_H}"/>'
-        '<xdr:pic><xdr:nvPicPr>'
-        '<xdr:cNvPr id="1" name="Logo"/><xdr:cNvPicPr/></xdr:nvPicPr>'
-        '<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rId1"/>'
-        '<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
-        '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
-        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
-        '</xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>'
-    )
-    drawing_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/logo.jpeg"/>'
-        '</Relationships>'
-    )
-
-    out = io.BytesIO()
-    with zf.ZipFile(io.BytesIO(raw)) as zin:
-        with zf.ZipFile(out, "w", zf.ZIP_DEFLATED) as zout:
-            for item in zin.namelist():
-                data = zin.read(item)
-                if item == "xl/worksheets/sheet1.xml":
-                    s = data.decode("utf-8")
-                    if "<drawing" not in s:
-                        s = s.replace("</worksheet>", '<drawing r:id="rIdLogo"/></worksheet>')
-                        # r namespace zaten sheet'te var mı? garantiye al
-                        if 'xmlns:r=' not in s.split('>',1)[0]:
-                            s = s.replace("<worksheet ",
-                                '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ', 1)
-                    data = s.encode("utf-8")
-                elif item == "[Content_Types].xml":
-                    s = data.decode("utf-8")
-                    add = ""
-                    if 'Extension="jpeg"' not in s:
-                        add += '<Default Extension="jpeg" ContentType="image/jpeg"/>'
-                    if "drawing1.xml" not in s:
-                        add += '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
-                    s = s.replace("</Types>", add + "</Types>")
-                    data = s.encode("utf-8")
-                zout.writestr(item, data)
-
-            # sheet1 rels: drawing ilişkisi ekle
-            rels_path = "xl/worksheets/_rels/sheet1.xml.rels"
-            existing_rels = None
-            try:
-                existing_rels = zin.read(rels_path).decode("utf-8")
-            except KeyError:
-                existing_rels = None
-            if existing_rels:
-                if "rIdLogo" not in existing_rels:
-                    existing_rels = existing_rels.replace("</Relationships>",
-                        '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
-                zout.writestr(rels_path, existing_rels)
-            else:
-                zout.writestr(rels_path,
-                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-                    '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
-
-            zout.writestr("xl/drawings/drawing1.xml", drawing_xml)
-            zout.writestr("xl/drawings/_rels/drawing1.xml.rels", drawing_rels)
-            zout.writestr("xl/media/logo.jpeg", logo_bytes)
-
-    out.seek(0)
-    return out
 
 
 @app.route("/teklif", methods=["POST"])
