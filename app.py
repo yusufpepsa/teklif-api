@@ -275,6 +275,7 @@ from datetime import datetime
 import os, copy
 
 SABLON_PATH = os.path.join(os.path.dirname(__file__), "sablon.xlsx")
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "logo.png")
 
 # Şablondaki sabit satır yapısı
 SEC_LAYOUT = {
@@ -294,6 +295,22 @@ def build_teklif(data):
     wb = load_workbook(SABLON_PATH)
     ws = wb.active
 
+    # ── Logo: şablondaki eski resmi temizle, koddan yeniden ekle (openpyxl korumada sorun çıkarıyor) ──
+    try:
+        ws._images = []  # varsa eski/bozuk resmi kaldır
+    except Exception:
+        pass
+    try:
+        if os.path.exists(LOGO_PATH):
+            from openpyxl.drawing.image import Image as XLImage
+            logo = XLImage(LOGO_PATH)
+            logo.width = 239
+            logo.height = 70
+            logo.anchor = "B2"
+            ws.add_image(logo)
+    except Exception:
+        pass
+
     # ── Üst bilgi ──
     ws["F1"] = data.get("magaza_adi", "")
     ws["F2"] = data.get("magaza_kodu", "")
@@ -302,10 +319,13 @@ def build_teklif(data):
     ws["F5"] = "TRY"
     ws["F6"] = data.get("hazirlayan", "YUSUF FIRAT YAY")
 
-    # ── Şablondaki eski verileri temizle (hazır ET kod/açıklama KALIR, miktar/fiyat SİLİNİR) ──
+    # ── Şablondaki TÜM eski kalem verilerini temizle (ET kod ve açıklama DAHİL) ──
+    # Kullanıcı sadece kendi eklediği kalemleri görmek istiyor.
     for sec, lay in SEC_LAYOUT.items():
         for r in range(lay["veri"][0], lay["veri"][1] + 1):
             ws[f"A{r}"] = None   # No
+            ws[f"B{r}"] = None   # ET Kod
+            ws[f"C{r}"] = None   # Açıklama
             ws[f"D{r}"] = None   # Birim
             ws[f"E{r}"] = None   # Miktar
             ws[f"F{r}"] = None   # Birim Fiyat
@@ -317,48 +337,19 @@ def build_teklif(data):
     for k in data.get("kalemler", []):
         by_sec.setdefault(k.get("bolum", "E"), []).append(k)
 
-    # Şablondaki hazır kalemlerin ET kodları (B ve C bölümü)
-    def read_existing(sec):
-        lay = SEC_LAYOUT[sec]
-        existing = {}
-        for r in range(lay["veri"][0], lay["veri"][1] + 1):
-            et = ws[f"B{r}"].value
-            if et:
-                existing[str(et).strip()] = r
-        return existing
-
+    # Kalemleri sırayla boş satırlara yaz (hazır kalem mantığı yok, sadece kullanıcının girdikleri)
     for sec in ["A", "B", "C", "D", "E"]:
         items = by_sec.get(sec, [])
         lay = SEC_LAYOUT[sec]
         v_start, v_end = lay["veri"]
-        existing = read_existing(sec)
-        used_rows = set()
         no = 1
-
+        r = v_start
         for k in items:
-            et = str(k.get("et_kodu", "")).strip()
-            # Şablonda bu ET kodu hazır varsa o satıra yaz
-            if et and et in existing:
-                r = existing[et]
-            else:
-                # Boş bir satır bul
-                r = None
-                for rr in range(v_start, v_end + 1):
-                    if rr not in used_rows and not ws[f"B{rr}"].value and not ws[f"C{rr}"].value:
-                        r = rr
-                        break
-                if r is None:
-                    # Boş satır kalmadıysa hazır ama bu teklifte kullanılmayan satırı kullan
-                    for rr in range(v_start, v_end + 1):
-                        if rr not in used_rows:
-                            r = rr
-                            break
-                if r is None:
-                    continue
-                ws[f"B{r}"] = et
-                ws[f"C{r}"] = k.get("aciklama", "")
-            used_rows.add(r)
+            if r > v_end:
+                break  # bölümde yer kalmadı
             ws[f"A{r}"] = no
+            ws[f"B{r}"] = str(k.get("et_kodu", "")).strip()
+            ws[f"C{r}"] = k.get("aciklama", "")
             ws[f"D{r}"] = k.get("birim", "ADET")
             ws[f"E{r}"] = k.get("miktar", 0)
             ws[f"F{r}"] = k.get("birim_fiyat", 0)
@@ -366,6 +357,7 @@ def build_teklif(data):
             if k.get("not"):
                 ws[f"I{r}"] = k.get("not")
             no += 1
+            r += 1
 
     # ── Notlar ──
     notlar = data.get("notlar", {})
@@ -378,9 +370,8 @@ def build_teklif(data):
     if notlar.get("not4"):
         ws["C48"] = notlar.get("not4")
 
-    # ── Ek not ──
-    if data.get("ek_not"):
-        ws["C52"] = data.get("ek_not")
+    # ── Ek not ── (kullanıcı göndermezse şablondaki eski yazıyı temizle)
+    ws["C52"] = data.get("ek_not", "") or None
 
     # ── Formülleri yaz (Excel'de miktar/fiyat değişince otomatik güncellensin) ──
     # G sütunu (tutar) zaten =E*F formülü olarak yazıldı yukarıda.
@@ -396,7 +387,7 @@ def build_teklif(data):
     ws["H55"] = "=H53*0.2"             # KDV %20
     ws["H56"] = "=H53+H55"            # G.TOPLAM (bozuk şablon formülü düzeltildi)
 
-    # Excel'in dosyayı açar açmaz formülleri hesaplaması için ayar
+    # Excel dosyayı açar açmaz formülleri hesaplasın
     wb.calculation.fullCalcOnLoad = True
 
     buf = io.BytesIO()
