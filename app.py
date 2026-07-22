@@ -37,6 +37,11 @@ def cell_border(top=False, bottom=False, left=False, right=False):
 
 
 # ─── Teklif Okuma ────────────────────────────────────────
+def safe_filename(s):
+    """Dosya adı için geçersiz karakterleri temizle."""
+    return re.sub(r'[/\\:*?"<>|]', "-", s).strip()
+
+
 def parse_teklif(file_bytes):
     """Teklif Excel'ini oku, üst bilgileri ve kalemleri ayıkla"""
     wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
@@ -377,3 +382,54 @@ def create_teklif_and_ax():
         download_name=f"{base}.zip",
         mimetype="application/zip",
     )
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/ax", methods=["POST"])
+def convert_ax():
+    """Teklif Excel'i al, AX Excel'i döndür"""
+    if "file" not in request.files:
+        return jsonify({"error": "Dosya bulunamadı. 'file' alanında Excel gönderin."}), 400
+    f = request.files["file"]
+    if not f.filename.lower().endswith((".xlsx", ".xlsm")):
+        return jsonify({"error": "Sadece .xlsx veya .xlsm dosyaları kabul edilir."}), 400
+    try:
+        file_bytes = f.read()
+        info, kalemler = parse_teklif(file_bytes)
+    except Exception as e:
+        return jsonify({"error": f"Dosya okunamadı: {str(e)}"}), 422
+    if not kalemler:
+        return jsonify({"error": "Dosyada tutarı 0'dan büyük kalem bulunamadı."}), 422
+    ax_buf = build_ax(info, kalemler)
+    parts = ["AX"]
+    if info["magaza_kodu"]:
+        parts.append(info["magaza_kodu"])
+    if info["magaza_adi"]:
+        parts.append(info["magaza_adi"])
+    if info["srv_no"]:
+        parts.append(info["srv_no"])
+    fname = safe_filename("-".join(parts)) + ".xlsx"
+    return send_file(ax_buf, as_attachment=True, download_name=fname,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@app.route("/ax/preview", methods=["POST"])
+def preview_ax():
+    """İndirmeden önce önizleme verisi döndür (JSON)"""
+    if "file" not in request.files:
+        return jsonify({"error": "Dosya bulunamadı."}), 400
+    f = request.files["file"]
+    try:
+        file_bytes = f.read()
+        info, kalemler = parse_teklif(file_bytes)
+    except Exception as e:
+        return jsonify({"error": f"Dosya okunamadı: {str(e)}"}), 422
+    return jsonify({"info": info, "kalemler": kalemler, "kalem_sayisi": len(kalemler)})
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
