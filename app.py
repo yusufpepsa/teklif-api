@@ -224,6 +224,21 @@ def build_teklif(data):
     wb = load_workbook(SABLON_PATH)
     ws = wb.active
 
+    # ── Logo: şablonun resmine güvenme (Python 3.14 openpyxl düşürüyor), koddan ekle ──
+    try:
+        ws._images = []  # şablondan gelen (bozulmuş olabilecek) resmi temizle
+    except Exception:
+        pass
+    if os.path.exists(LOGO_PATH):
+        try:
+            from openpyxl.drawing.image import Image as XLImage
+            logo_img = XLImage(LOGO_PATH)
+            logo_img.width = 239
+            logo_img.height = 70
+            ws.add_image(logo_img, "B1")
+        except Exception:
+            pass
+
     # ── Üst bilgi ──
     ws["F1"] = data.get("magaza_adi", "")
     ws["F2"] = data.get("magaza_kodu", "")
