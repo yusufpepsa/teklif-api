@@ -382,6 +382,23 @@ def build_teklif(data):
     if data.get("ek_not"):
         ws["C52"] = data.get("ek_not")
 
+    # ── Formülleri yaz (Excel'de miktar/fiyat değişince otomatik güncellensin) ──
+    # G sütunu (tutar) zaten =E*F formülü olarak yazıldı yukarıda.
+    # Bölüm ara toplamları ve genel toplamlar da formül olsun:
+    for sec, lay in SEC_LAYOUT.items():
+        v_start, v_end = lay["veri"]
+        ws[f"H{lay['toplam']}"] = f"=SUM(G{v_start}:G{v_end})"
+
+    toplam_satirlari = [SEC_LAYOUT[s]["toplam"] for s in SEC_LAYOUT]
+    toplam_formula = "+".join([f"H{r}" for r in toplam_satirlari])
+    ws["H53"] = f"={toplam_formula}"   # TOPLAM
+    ws["H54"] = None                    # KDV %8 kullanılmıyor
+    ws["H55"] = "=H53*0.2"             # KDV %20
+    ws["H56"] = "=H53+H55"            # G.TOPLAM (bozuk şablon formülü düzeltildi)
+
+    # Excel'in dosyayı açar açmaz formülleri hesaplaması için ayar
+    wb.calculation.fullCalcOnLoad = True
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
