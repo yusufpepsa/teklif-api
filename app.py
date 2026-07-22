@@ -446,5 +446,42 @@ def preview_ax():
     return jsonify({"info": info, "kalemler": kalemler, "kalem_sayisi": len(kalemler)})
 
 
+@app.route("/diag", methods=["GET"])
+def diag():
+    """Teşhis: Python sürümü, logo durumu, dosya yolları"""
+    import sys
+    info = {
+        "python": sys.version,
+        "logo_path": LOGO_PATH,
+        "logo_exists": os.path.exists(LOGO_PATH),
+        "logo_size": os.path.getsize(LOGO_PATH) if os.path.exists(LOGO_PATH) else 0,
+        "sablon_path": SABLON_PATH,
+        "sablon_exists": os.path.exists(SABLON_PATH),
+        "cwd": os.getcwd(),
+        "dir_listing": os.listdir(os.path.dirname(os.path.abspath(__file__))),
+    }
+    # Logo eklenebilir mi test et
+    try:
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as XLImage
+        twb = Workbook()
+        tws = twb.active
+        if os.path.exists(LOGO_PATH):
+            img = XLImage(LOGO_PATH)
+            tws.add_image(img, "A1")
+            import io as _io
+            b = _io.BytesIO()
+            twb.save(b)
+            b.seek(0)
+            import zipfile as _zf
+            with _zf.ZipFile(b) as _z:
+                info["test_logo_media"] = [n for n in _z.namelist() if "media" in n]
+        info["add_image_works"] = True
+    except Exception as e:
+        info["add_image_works"] = False
+        info["add_image_error"] = str(e)
+    return jsonify(info)
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
