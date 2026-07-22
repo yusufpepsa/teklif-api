@@ -266,3 +266,207 @@ def preview_ax():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=False)
+
+
+# ═════════════════════════════════════════════════════════
+# TEKLİF DOSYASI ÜRETME — Şablon tabanlı (birebir kopya)
+# ═════════════════════════════════════════════════════════
+from datetime import datetime
+import os, copy
+
+SABLON_PATH = os.path.join(os.path.dirname(__file__), "sablon.xlsx")
+
+# Şablondaki sabit satır yapısı
+SEC_LAYOUT = {
+    "A": {"baslik": 10, "veri": (11, 16), "toplam": 17},
+    "B": {"baslik": 18, "veri": (19, 28), "toplam": 29},
+    "C": {"baslik": 30, "veri": (31, 32), "toplam": 33},
+    "D": {"baslik": 34, "veri": (35, 39), "toplam": 40},
+    "E": {"baslik": 41, "veri": (42, 42), "toplam": 43},
+}
+# Not: Şablonda B ve C bölümlerinde HAZIR kalemler var (ET kodlu).
+# Kullanıcının gönderdiği kalemleri bu hazır satırlarla eşleştirip
+# miktar/fiyat yazacağız; eşleşmeyen yeni kalemleri boş satırlara ekleyeceğiz.
+
+
+def build_teklif(data):
+    """Orijinal şablonu açar, sadece verileri doldurur — %100 birebir görünüm."""
+    wb = load_workbook(SABLON_PATH)
+    ws = wb.active
+
+    # ── Üst bilgi ──
+    ws["F1"] = data.get("magaza_adi", "")
+    ws["F2"] = data.get("magaza_kodu", "")
+    ws["F3"] = data.get("srv_no", "")
+    ws["F4"] = data.get("tarih", datetime.now().strftime("%d.%m.%Y"))
+    ws["F5"] = "TRY"
+    ws["F6"] = data.get("hazirlayan", "YUSUF FIRAT YAY")
+
+    # ── Şablondaki eski verileri temizle (hazır ET kod/açıklama KALIR, miktar/fiyat SİLİNİR) ──
+    for sec, lay in SEC_LAYOUT.items():
+        for r in range(lay["veri"][0], lay["veri"][1] + 1):
+            ws[f"A{r}"] = None   # No
+            ws[f"D{r}"] = None   # Birim
+            ws[f"E{r}"] = None   # Miktar
+            ws[f"F{r}"] = None   # Birim Fiyat
+            ws[f"G{r}"] = None   # Tutar
+            ws[f"I{r}"] = None   # Not
+
+    # ── Kalemleri bölümlere göre grupla ──
+    by_sec = {}
+    for k in data.get("kalemler", []):
+        by_sec.setdefault(k.get("bolum", "E"), []).append(k)
+
+    # Şablondaki hazır kalemlerin ET kodları (B ve C bölümü)
+    def read_existing(sec):
+        lay = SEC_LAYOUT[sec]
+        existing = {}
+        for r in range(lay["veri"][0], lay["veri"][1] + 1):
+            et = ws[f"B{r}"].value
+            if et:
+                existing[str(et).strip()] = r
+        return existing
+
+    for sec in ["A", "B", "C", "D", "E"]:
+        items = by_sec.get(sec, [])
+        lay = SEC_LAYOUT[sec]
+        v_start, v_end = lay["veri"]
+        existing = read_existing(sec)
+        used_rows = set()
+        no = 1
+
+        for k in items:
+            et = str(k.get("et_kodu", "")).strip()
+            # Şablonda bu ET kodu hazır varsa o satıra yaz
+            if et and et in existing:
+                r = existing[et]
+            else:
+                # Boş bir satır bul
+                r = None
+                for rr in range(v_start, v_end + 1):
+                    if rr not in used_rows and not ws[f"B{rr}"].value and not ws[f"C{rr}"].value:
+                        r = rr
+                        break
+                if r is None:
+                    # Boş satır kalmadıysa hazır ama bu teklifte kullanılmayan satırı kullan
+                    for rr in range(v_start, v_end + 1):
+                        if rr not in used_rows:
+                            r = rr
+                            break
+                if r is None:
+                    continue
+                ws[f"B{r}"] = et
+                ws[f"C{r}"] = k.get("aciklama", "")
+            used_rows.add(r)
+            ws[f"A{r}"] = no
+            ws[f"D{r}"] = k.get("birim", "ADET")
+            ws[f"E{r}"] = k.get("miktar", 0)
+            ws[f"F{r}"] = k.get("birim_fiyat", 0)
+            ws[f"G{r}"] = f"=E{r}*F{r}"
+            if k.get("not"):
+                ws[f"I{r}"] = k.get("not")
+            no += 1
+
+    # ── Notlar ──
+    notlar = data.get("notlar", {})
+    if notlar.get("uretim_sevk_suresi") not in (None, ""):
+        ws["E45"] = notlar.get("uretim_sevk_suresi")
+    if notlar.get("tadilat_suresi") not in (None, ""):
+        ws["E46"] = notlar.get("tadilat_suresi")
+    if notlar.get("not3"):
+        ws["C47"] = notlar.get("not3")
+    if notlar.get("not4"):
+        ws["C48"] = notlar.get("not4")
+
+    # ── Ek not ──
+    if data.get("ek_not"):
+        ws["C52"] = data.get("ek_not")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/teklif", methods=["POST"])
+def create_teklif():
+    """JSON verisinden teklif Excel'i üret"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON verisi bulunamadı."}), 400
+
+    if not data.get("magaza_adi") or not data.get("magaza_kodu"):
+        return jsonify({"error": "Mağaza adı ve kodu zorunludur."}), 400
+
+    try:
+        buf = build_teklif(data)
+    except Exception as e:
+        return jsonify({"error": f"Teklif oluşturulamadı: {str(e)}"}), 500
+
+    parts = []
+    if data.get("magaza_kodu"):
+        parts.append(data["magaza_kodu"])
+    if data.get("magaza_adi"):
+        parts.append(data["magaza_adi"])
+    if data.get("srv_no"):
+        parts.append(data["srv_no"])
+    fname = safe_filename(" ".join(parts)) + " - TEKLIF.xlsx"
+
+    return send_file(
+        buf,
+        as_attachment=True,
+        download_name=fname,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/teklif-ve-ax", methods=["POST"])
+def create_teklif_and_ax():
+    """JSON verisinden hem teklif hem AX üret, ikisini zip olarak döndür"""
+    import zipfile as zf
+
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "JSON verisi bulunamadı."}), 400
+
+    try:
+        teklif_buf = build_teklif(data)
+        # AX için kalemleri dönüştür (tutar > 0 olanlar)
+        info = {
+            "magaza_adi": data.get("magaza_adi", ""),
+            "magaza_kodu": data.get("magaza_kodu", ""),
+            "srv_no": data.get("srv_no", ""),
+        }
+        ax_kalemler = []
+        for k in data.get("kalemler", []):
+            tutar = (k.get("miktar", 0) or 0) * (k.get("birim_fiyat", 0) or 0)
+            if tutar > 0:
+                ax_kalemler.append({
+                    "aciklama": k.get("aciklama", ""),
+                    "birim": k.get("birim", "ADET"),
+                    "miktar": k.get("miktar", 0),
+                    "birim_fiyat": k.get("birim_fiyat", 0),
+                    "et_kod": k.get("et_kodu", ""),
+                })
+        ax_buf = build_ax(info, ax_kalemler)
+    except Exception as e:
+        return jsonify({"error": f"Dosyalar oluşturulamadı: {str(e)}"}), 500
+
+    # Dosya isimleri: TEKLİF = "kod-ad-srv", AX = "AX-kod-ad-srv"
+    parcalar = [p for p in [data.get("magaza_kodu",""), data.get("magaza_adi",""), data.get("srv_no","")] if p]
+    base = safe_filename("-".join(parcalar))
+    teklif_name = f"{base}.xlsx"
+    ax_name = f"AX-{base}.xlsx"
+
+    zip_buf = io.BytesIO()
+    with zf.ZipFile(zip_buf, "w", zf.ZIP_DEFLATED) as z:
+        z.writestr(teklif_name, teklif_buf.read())
+        z.writestr(ax_name, ax_buf.read())
+    zip_buf.seek(0)
+
+    return send_file(
+        zip_buf,
+        as_attachment=True,
+        download_name=f"{base}.zip",
+        mimetype="application/zip",
+    )
