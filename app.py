@@ -303,13 +303,17 @@ def build_teklif(data):
     try:
         if os.path.exists(LOGO_PATH):
             from openpyxl.drawing.image import Image as XLImage
+            from openpyxl.drawing.spreadsheet_drawing import OneCellAnchor, AnchorMarker
+            from openpyxl.drawing.xdr import XDRPositiveSize2D
+            from openpyxl.utils.units import pixels_to_EMU
             logo = XLImage(LOGO_PATH)
-            logo.width = 239
-            logo.height = 70
-            logo.anchor = "B2"
+            # Orijinal boyut: 239x70 piksel, B2 hücresine sabit yerleşim
+            _from = AnchorMarker(col=1, colOff=pixels_to_EMU(8), row=1, rowOff=pixels_to_EMU(4))
+            size = XDRPositiveSize2D(pixels_to_EMU(239), pixels_to_EMU(70))
+            logo.anchor = OneCellAnchor(_from=_from, ext=size)
             ws.add_image(logo)
-    except Exception:
-        pass
+    except Exception as e:
+        print("Logo hatası:", e)
 
     # ── Üst bilgi ──
     ws["F1"] = data.get("magaza_adi", "")
