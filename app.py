@@ -192,7 +192,111 @@ def build_ax(info, kalemler):
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
+
+    # GARANTİLİ logo: çıktıda logo yoksa logo.png'yi zip düzeyinde enjekte et
+    buf = _ensure_logo(buf)
     return buf
+
+
+def _ensure_logo(xlsx_buf):
+    """Çıktıda logo yoksa logo.png'yi B1 hücresine zip düzeyinde ekler."""
+    import zipfile as zf
+
+    xlsx_buf.seek(0)
+    raw = xlsx_buf.read()
+
+    # Zaten logo varsa dokunma
+    try:
+        with zf.ZipFile(io.BytesIO(raw)) as ztest:
+            if any('media' in n for n in ztest.namelist()):
+                xlsx_buf.seek(0)
+                return xlsx_buf
+    except Exception:
+        xlsx_buf.seek(0)
+        return xlsx_buf
+
+    if not os.path.exists(LOGO_PATH):
+        xlsx_buf.seek(0)
+        return xlsx_buf
+
+    with open(LOGO_PATH, "rb") as fh:
+        logo_bytes = fh.read()
+
+    # Drawing XML: logoyu B1'e (col 1, row 0) 239x70 px yerleştir
+    EMU_W = 239 * 9525
+    EMU_H = 70 * 9525
+    drawing_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<xdr:oneCellAnchor>'
+        '<xdr:from><xdr:col>1</xdr:col><xdr:colOff>76200</xdr:colOff>'
+        '<xdr:row>0</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
+        f'<xdr:ext cx="{EMU_W}" cy="{EMU_H}"/>'
+        '<xdr:pic><xdr:nvPicPr>'
+        '<xdr:cNvPr id="1" name="Logo"/><xdr:cNvPicPr/></xdr:nvPicPr>'
+        '<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rId1"/>'
+        '<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+        '</xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>'
+    )
+    drawing_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/logo.jpeg"/>'
+        '</Relationships>'
+    )
+
+    out = io.BytesIO()
+    with zf.ZipFile(io.BytesIO(raw)) as zin:
+        with zf.ZipFile(out, "w", zf.ZIP_DEFLATED) as zout:
+            for item in zin.namelist():
+                data = zin.read(item)
+                if item == "xl/worksheets/sheet1.xml":
+                    s = data.decode("utf-8")
+                    if "<drawing" not in s:
+                        s = s.replace("</worksheet>", '<drawing r:id="rIdLogo"/></worksheet>')
+                        # r namespace zaten sheet'te var mı? garantiye al
+                        if 'xmlns:r=' not in s.split('>',1)[0]:
+                            s = s.replace("<worksheet ",
+                                '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ', 1)
+                    data = s.encode("utf-8")
+                elif item == "[Content_Types].xml":
+                    s = data.decode("utf-8")
+                    add = ""
+                    if 'Extension="jpeg"' not in s:
+                        add += '<Default Extension="jpeg" ContentType="image/jpeg"/>'
+                    if "drawing1.xml" not in s:
+                        add += '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+                    s = s.replace("</Types>", add + "</Types>")
+                    data = s.encode("utf-8")
+                zout.writestr(item, data)
+
+            # sheet1 rels: drawing ilişkisi ekle
+            rels_path = "xl/worksheets/_rels/sheet1.xml.rels"
+            existing_rels = None
+            try:
+                existing_rels = zin.read(rels_path).decode("utf-8")
+            except KeyError:
+                existing_rels = None
+            if existing_rels:
+                if "rIdLogo" not in existing_rels:
+                    existing_rels = existing_rels.replace("</Relationships>",
+                        '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
+                zout.writestr(rels_path, existing_rels)
+            else:
+                zout.writestr(rels_path,
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
+
+            zout.writestr("xl/drawings/drawing1.xml", drawing_xml)
+            zout.writestr("xl/drawings/_rels/drawing1.xml.rels", drawing_rels)
+            zout.writestr("xl/media/logo.jpeg", logo_bytes)
+
+    out.seek(0)
+    return out
 
 
 def safe_filename(s):
@@ -377,7 +481,111 @@ def build_teklif(data):
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
+
+    # GARANTİLİ logo: çıktıda logo yoksa logo.png'yi zip düzeyinde enjekte et
+    buf = _ensure_logo(buf)
     return buf
+
+
+def _ensure_logo(xlsx_buf):
+    """Çıktıda logo yoksa logo.png'yi B1 hücresine zip düzeyinde ekler."""
+    import zipfile as zf
+
+    xlsx_buf.seek(0)
+    raw = xlsx_buf.read()
+
+    # Zaten logo varsa dokunma
+    try:
+        with zf.ZipFile(io.BytesIO(raw)) as ztest:
+            if any('media' in n for n in ztest.namelist()):
+                xlsx_buf.seek(0)
+                return xlsx_buf
+    except Exception:
+        xlsx_buf.seek(0)
+        return xlsx_buf
+
+    if not os.path.exists(LOGO_PATH):
+        xlsx_buf.seek(0)
+        return xlsx_buf
+
+    with open(LOGO_PATH, "rb") as fh:
+        logo_bytes = fh.read()
+
+    # Drawing XML: logoyu B1'e (col 1, row 0) 239x70 px yerleştir
+    EMU_W = 239 * 9525
+    EMU_H = 70 * 9525
+    drawing_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<xdr:oneCellAnchor>'
+        '<xdr:from><xdr:col>1</xdr:col><xdr:colOff>76200</xdr:colOff>'
+        '<xdr:row>0</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from>'
+        f'<xdr:ext cx="{EMU_W}" cy="{EMU_H}"/>'
+        '<xdr:pic><xdr:nvPicPr>'
+        '<xdr:cNvPr id="1" name="Logo"/><xdr:cNvPicPr/></xdr:nvPicPr>'
+        '<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rId1"/>'
+        '<a:stretch><a:fillRect/></a:stretch></xdr:blipFill>'
+        '<xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></a:xfrm>'
+        '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr>'
+        '</xdr:pic><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>'
+    )
+    drawing_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/logo.jpeg"/>'
+        '</Relationships>'
+    )
+
+    out = io.BytesIO()
+    with zf.ZipFile(io.BytesIO(raw)) as zin:
+        with zf.ZipFile(out, "w", zf.ZIP_DEFLATED) as zout:
+            for item in zin.namelist():
+                data = zin.read(item)
+                if item == "xl/worksheets/sheet1.xml":
+                    s = data.decode("utf-8")
+                    if "<drawing" not in s:
+                        s = s.replace("</worksheet>", '<drawing r:id="rIdLogo"/></worksheet>')
+                        # r namespace zaten sheet'te var mı? garantiye al
+                        if 'xmlns:r=' not in s.split('>',1)[0]:
+                            s = s.replace("<worksheet ",
+                                '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ', 1)
+                    data = s.encode("utf-8")
+                elif item == "[Content_Types].xml":
+                    s = data.decode("utf-8")
+                    add = ""
+                    if 'Extension="jpeg"' not in s:
+                        add += '<Default Extension="jpeg" ContentType="image/jpeg"/>'
+                    if "drawing1.xml" not in s:
+                        add += '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/>'
+                    s = s.replace("</Types>", add + "</Types>")
+                    data = s.encode("utf-8")
+                zout.writestr(item, data)
+
+            # sheet1 rels: drawing ilişkisi ekle
+            rels_path = "xl/worksheets/_rels/sheet1.xml.rels"
+            existing_rels = None
+            try:
+                existing_rels = zin.read(rels_path).decode("utf-8")
+            except KeyError:
+                existing_rels = None
+            if existing_rels:
+                if "rIdLogo" not in existing_rels:
+                    existing_rels = existing_rels.replace("</Relationships>",
+                        '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
+                zout.writestr(rels_path, existing_rels)
+            else:
+                zout.writestr(rels_path,
+                    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    '<Relationship Id="rIdLogo" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>')
+
+            zout.writestr("xl/drawings/drawing1.xml", drawing_xml)
+            zout.writestr("xl/drawings/_rels/drawing1.xml.rels", drawing_rels)
+            zout.writestr("xl/media/logo.jpeg", logo_bytes)
+
+    out.seek(0)
+    return out
 
 
 @app.route("/teklif", methods=["POST"])
